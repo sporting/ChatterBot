@@ -80,17 +80,29 @@ class SQLAlchemyDatabaseAdapter(StorageAdapter):
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        self.database_name = self.kwargs.get(
-            "database", "chatterbot-database"
-        )
+        self.database_name = self.kwargs.get("database")
+        self.adapter_supports_queries = False
 
-        # if some annoying blank space wrong...
-        db_name = self.database_name.strip()
 
-        # default uses sqlite
+        if self.database_name:
+            # if some annoying blank space wrong...
+            db_name = self.database_name.strip()
+            # if set dbname only will create sql file.
+            self.database_uri = self.kwargs.get(
+                "database_uri", "sqlite:///" + db_name + ".db"
+            )
+
+        # default uses sqlite memory database.
         self.database_uri = self.kwargs.get(
-            "database_uri", "sqlite:///" + db_name + ".db"
+            "database_uri", "sqlite://"
         )
+
+        self.to_memory = self.kwargs.get("to_memory",False)
+        if self.to_memory:
+            self.database_file = self.database_uri
+            self.database_uri = "sqlite://"
+            self.source_engine = create_engine(self.database_file)
+            self.SourceSession = sessionmaker(bind=self.source_engine)            
 
         self.engine = create_engine(self.database_uri)
 
@@ -98,12 +110,39 @@ class SQLAlchemyDatabaseAdapter(StorageAdapter):
             "read_only", False
         )
 
+        # To force recreate tables
         create = self.kwargs.get("create", False)
 
         if not self.read_only and create:
+            self.drop()
             self.create()
 
+        if not self.read_only and not create:  # create tables already done
+            tables_needed = Base.metadata.sorted_tables  # current tables
+            metadata = MetaData()
+            metadata.reflect(self.engine)
+            tables = metadata.tables.values()
+            if not tables:
+                self.create()
+            else:
+                for table in tables_needed:
+                    if not self.engine.dialect.has_table(self.engine, table.name):
+                        # If table don't exist, Create.
+                        Base.metadata.create_all(self.engine, tables=[table])
+
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=True)
+
+        # import db to memory
+        if not self.read_only and self.to_memory:
+            sourceSession = self.SourceSession()
+            destSession = self.Session()
+            for table in tables_needed:
+                query = sourceSession.query(table).all()
+                for row in query:
+                    destSession.execute(table.insert(row))
+                destSession.commit()
+      
+
 
     def count(self):
         """
